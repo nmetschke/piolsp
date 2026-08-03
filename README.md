@@ -1,3 +1,5 @@
+[![Build](https://github.com/nmetschke/piolsp/actions/workflows/test.yml/badge.svg)](https://github.com/nmetschke/piolsp/actions/workflows/test.yml)
+
 # Overview
 
 Small LSP Server for Raspberry Pi Pio Assembly. Recommended to use in conjunction with [tree-sitter-pio](https://github.com/nmetschke/tree-sitter-pio) for syntax highlighting and other tree-sitter queries.
