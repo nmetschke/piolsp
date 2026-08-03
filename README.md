@@ -24,6 +24,8 @@ Small LSP Server for Raspberry Pi Pio Assembly. Recommended to use in conjunctio
 
 ### Nix flake
 
+Add the input
+
 ```nix
 {
   inputs.piolsp = {
@@ -32,6 +34,14 @@ Small LSP Server for Raspberry Pi Pio Assembly. Recommended to use in conjunctio
   };
 }
 ```
+
+and use the package
+
+```nix
+  inputs.piolsp.packages.${pkgs.stdenv.hostPlatform.system}.default
+```
+
+.
 
 ### Building from source
 
@@ -95,7 +105,7 @@ inputs = {
 and configure helix to use them
 
 ```nix
-{ inputs, ... }:
+{ pkgs, inputs, ... }:
 {
   programs.helix = {
     languages = {
@@ -111,7 +121,7 @@ and configure helix to use them
       language-server = [
         {
           piolsp = {
-            command = lib.getExe inputs.piolsp;
+            command = lib.getExe inputs.piolsp.packages.${pkgs.stdenv.hostPlatform.system}.default;
             # optional: pioasm is used for diagnostics, not needed if pioasm is already in $PATH
             args = [
               "--pioasm"

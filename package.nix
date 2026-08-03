@@ -9,4 +9,11 @@ rustPlatform.buildRustPackage {
   };
 
   checkFlags = [ "--skip=formatter::test::format_pico_examples" ]; # requires submodule
+
+  meta = {
+    description = "LSP Server for Raspberry Pi PIO assembly";
+    homepage = "https://github.com/nmetschke/piolsp";
+    mainProgram = "piolsp";
+    license = lib.licenses.mit;
+  };
 }
