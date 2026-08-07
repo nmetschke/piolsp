@@ -2,6 +2,11 @@
 name = "piolsp"
 version = "0.1.0"
 edition = "2024"
+description = "LSP Server for Raspberry Pi PIO assembly"
+readme = "README.md"
+repository = "https://github.com/nmetschke/piolsp"
+license = "MIT"
+keywords = ["language-server", "lsp", "pio"]
 
 [dependencies]
 gen-lsp-types = { version = "0.11", features = ["url"] }
