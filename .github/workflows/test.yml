@@ -1,7 +1,17 @@
 name: "Test"
 on:
   pull_request:
+      paths:
+      - src/**
+      - tests/**
+      - Cargo.toml
+      - Cargo.lock
   push:
+      paths:
+      - src/**
+      - tests/**
+      - Cargo.toml
+      - Cargo.lock
 jobs:
   tests:
     runs-on: ubuntu-latest
