@@ -25,8 +25,8 @@ fn print_help_and_exit(msg: Option<String>) -> ! {
     }
     eprintln!(
         r#"
-usage: {} (--help) (--version) (--logfile <path>) (--verbose|-v) (--pioasm <path>) (format|fmt <input_file>)
-    --help                    Print help message and exit.
+usage: {} [--help|-h] [--version] [--logfile <path>] [--verbose|-v] [--pioasm <path>] [format|fmt <input_file>]
+    --help|-h                 Print help message and exit.
     --version                 Print version and exit.
     --pioasm <path>           Path to pioasm binary. Searches in $PATH if nor is specified.
     --logfile <path>          Write logs to this file.
@@ -63,7 +63,7 @@ fn parse_args() -> Result<Args, String> {
     let mut next_is_fmt_file = false;
     for arg in std::env::args().skip(1) {
         match arg.as_str() {
-            "--help" => print_help_and_exit(None),
+            "--help" | "-h" => print_help_and_exit(None),
             "--version" => {
                 println!("{}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0)
