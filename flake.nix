@@ -43,6 +43,7 @@
             clippy
             rust-analyzer
             rustfmt
+            pioasm
 
             (python3.withPackages (
               p: with p; [
