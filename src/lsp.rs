@@ -1,15 +1,16 @@
 use crate::{formatter::format_tree, pio_parser, pio_query, run_pioasm};
+use foldhash::{HashMap, HashMapExt};
 use gen_lsp_types::*;
 use lsp_server::{Connection, Message, Request as ServerRequest, RequestId, Response};
 use regex::Regex;
 use std::fmt::Write;
 use std::{
-    collections::{BTreeMap, HashMap},
     error::Error,
     path::{Path, PathBuf},
     sync::LazyLock,
 };
 use tree_sitter::{Node, QueryCursor, StreamingIterator};
+use yoke::{Yoke, Yokeable};
 
 /// convert treesitter Point to LSP Position (UTF-8 encoding only)
 const fn ts_point_to_lsp(p: tree_sitter::Point) -> Position {
@@ -117,23 +118,23 @@ struct ProgramLabel {
 
 /// ts declaration of program (.program)
 #[derive(Debug)]
-struct ProgramInfo {
+struct ProgramInfo<'a> {
     /// range of the full statement (e.g., ".program foo")
     statement_range: Range,
     /// number of instructions
     instr_count: u8,
     /// defines indexed by their name
-    defines: BTreeMap<String, ProgramDefine>,
+    defines: HashMap<&'a str, ProgramDefine>,
     /// defines indexed by their name
-    labels: BTreeMap<String, ProgramLabel>,
+    labels: HashMap<&'a str, ProgramLabel>,
 }
-impl ProgramInfo {
-    const fn new(statement_range: Range) -> Self {
+impl<'a> ProgramInfo<'a> {
+    fn new(statement_range: Range) -> Self {
         Self {
             statement_range,
             instr_count: 0,
-            defines: BTreeMap::new(),
-            labels: BTreeMap::new(),
+            defines: HashMap::default(),
+            labels: HashMap::default(),
         }
     }
 
@@ -152,38 +153,47 @@ impl ProgramInfo {
     }
 }
 
+/// programs and global defines
+#[derive(Yokeable, Default)]
+struct Programs<'a> {
+    /// programs in file index my name
+    programs: HashMap<&'a str, ProgramInfo<'a>>,
+    /// defines before the first program
+    global_defines: HashMap<&'a str, ProgramDefine>,
+}
+
 /// loaded pio file
 struct DocumentData {
-    /// src code
-    text: String,
     /// parsed tree-sitter tree
     tree: tree_sitter::Tree,
-    /// programs in file index my name
-    programs: BTreeMap<String, ProgramInfo>,
-    /// defines before the first program
-    global_defines: BTreeMap<String, ProgramDefine>,
     /// active inlay hints
     inlay_hints: Vec<InlayHint>,
+    /// programs and global defines, use Yoke so the struct can be self referential and avoid cloning
+    programs: Yoke<Programs<'static>, String>,
+
+    cursor: QueryCursor,
 }
 impl DocumentData {
     fn new(parser: &mut tree_sitter::Parser, text: String) -> Self {
-        let tree = parser.parse(&text, None).unwrap();
         let mut this = Self {
-            text,
-            tree,
-            programs: BTreeMap::new(),
-            global_defines: BTreeMap::new(),
+            programs: Yoke::attach_to_cart(String::new(), |_| Programs::default()),
+            tree: parser.parse("", None).unwrap(),
             inlay_hints: Vec::new(),
+            cursor: QueryCursor::new(),
         };
-        this.analyze_programs();
+        this.update(parser, text);
         this
     }
 
     /// update doc content and reanalyze
     fn update(&mut self, parser: &mut tree_sitter::Parser, text: String) {
-        self.text = text;
-        self.tree = parser.parse(&self.text, None).unwrap();
-        self.analyze_programs();
+        self.tree = parser.parse(&text, None).unwrap();
+
+        let programs = self.programs.get();
+        let size_hint = (programs.programs.len(), programs.global_defines.len());
+
+        // reanalyze
+        self.programs = Yoke::attach_to_cart(text, |text| self.analyze_programs(text, size_hint));
     }
 
     /// find node at the cursor position
@@ -202,7 +212,7 @@ impl DocumentData {
                         let prog_name = c
                             .child_by_field_name("program_name")
                             .expect("no program_name field");
-                        return Some(&self.text[prog_name.byte_range()]);
+                        return Some(&self.programs.backing_cart()[prog_name.byte_range()]);
                     }
                 }
             }
@@ -240,17 +250,20 @@ impl DocumentData {
         // the program that this symbol is part of
         let mut program = self.program_at(node);
 
+        let doc_text = self.programs.backing_cart();
+        let defs = self.programs.get();
+
         // symbol name
-        let text = &self.text[node.byte_range()];
+        let node_text = &doc_text[node.byte_range()];
 
         // look up program info for program
-        let prog = program.and_then(|p| self.programs.get(p));
+        let prog = program.and_then(|p| defs.programs.get(p));
 
         // search for label if jmp address (could still be define otherwise)
-        if is_label && let Some(label) = prog.and_then(|p| p.labels.get(text)) {
+        if is_label && let Some(label) = prog.and_then(|p| p.labels.get(node_text)) {
             log::debug!("found label");
             return Some(SymbolDefinition {
-                text,
+                text: node_text,
                 statement_range: ts_range_to_lsp(label.statement_range),
                 name_range: ts_range_to_lsp(label.name_range),
                 program,
@@ -261,20 +274,20 @@ impl DocumentData {
         // look first for local and then for global definition
         let pd = prog
             .map(|e| &e.defines)
-            .and_then(|d| d.get(text))
+            .and_then(|d| d.get(node_text))
             .or_else(|| {
                 program = None; // found global, clear program
-                self.global_defines.get(text)
+                defs.global_defines.get(node_text)
             })?;
 
         log::debug!("found define");
         Some(SymbolDefinition {
-            text,
+            text: node_text,
             statement_range: ts_range_to_lsp(pd.statement_range),
             name_range: ts_range_to_lsp(pd.name_range),
             program,
             typ: SymbolType::Define {
-                value: &self.text[pd.value_range.start_byte..pd.value_range.end_byte],
+                value: &doc_text[pd.value_range.start_byte..pd.value_range.end_byte],
             },
         })
     }
@@ -300,14 +313,16 @@ impl DocumentData {
         let definition = self.get_definition(node)?;
         log::info!("found definition: {:?}", definition);
 
+        let doc_text = self.programs.backing_cart();
+
         let references = match definition.typ {
             SymbolType::Define { .. } => {
-                // TODO: precompute like we do for labels
+                // compute defines only when needed
                 let mut cursor = QueryCursor::new();
                 let mut it = cursor.matches(
                     &DEFINE_REFERENCE,
                     self.tree.root_node(),
-                    self.text.as_bytes(),
+                    doc_text.as_bytes(),
                 );
 
                 // find all matching symbols
@@ -317,10 +332,10 @@ impl DocumentData {
                     let n = m.captures[0].node;
                     match m.pattern_index {
                         0 if definition.program.is_some() => {
-                            program = Some(&self.text[n.byte_range()])
+                            program = Some(&doc_text[n.byte_range()])
                         }
                         1 if program == definition.program
-                            && &self.text[n.byte_range()] == definition.text =>
+                            && &doc_text[n.byte_range()] == definition.text =>
                         {
                             refs.push(ts_range_to_lsp(n.range()))
                         }
@@ -331,7 +346,11 @@ impl DocumentData {
             }
             SymbolType::Label => definition
                 .program
-                .map(|p| self.programs[p].labels[definition.text].references.clone())
+                .map(|p| {
+                    self.programs.get().programs[p].labels[definition.text]
+                        .references
+                        .clone()
+                })
                 .unwrap_or_default(),
         };
 
@@ -339,7 +358,7 @@ impl DocumentData {
     }
 
     /// look for the things the lsp in interested like "jump to definition" and inlay hints and populate self
-    fn analyze_programs(&mut self) {
+    fn analyze_programs<'a>(&mut self, text: &'a str, size_hint: (usize, usize)) -> Programs<'a> {
         // search for .program statements or instructions
         static PROG_INSTR_QUERY: LazyLock<tree_sitter::Query> = LazyLock::new(|| {
             pio_query(
@@ -367,20 +386,17 @@ impl DocumentData {
             )
         });
 
-        self.programs.clear();
-        self.global_defines.clear();
+        let mut programs = HashMap::with_capacity(size_hint.0);
+        let mut global_defines = HashMap::with_capacity(size_hint.1);
         self.inlay_hints.clear();
 
-        let mut cursor = QueryCursor::new(); // TODO: do we want to reuse this?
         let mut program = None; // current program
         let mut labels_for_instr = Vec::new(); // labels for the current instruction (could have multiple in a row for the same instruction)
         let mut label_refs = Vec::new(); // all references to labels we find
         let mut pc = 0;
-        let mut it = cursor.matches(
-            &PROG_INSTR_QUERY,
-            self.tree.root_node(),
-            self.text.as_bytes(),
-        );
+        let mut it = self
+            .cursor
+            .matches(&PROG_INSTR_QUERY, self.tree.root_node(), text.as_bytes());
         while let Some(m) = it.next() {
             match m.pattern_index {
                 /*program directive*/
@@ -397,11 +413,11 @@ impl DocumentData {
                         "program_name"
                     );
 
-                    let name = self.text[name.node.byte_range()].to_owned();
+                    let name = &text[name.node.byte_range()];
                     let r = ts_range_to_lsp(statement.node.range());
                     if let Some((name, v)) = program.replace((name, ProgramInfo::new(r))) {
                         self.inlay_hints.push(v.prog_hint());
-                        self.programs.insert(name, v);
+                        programs.insert(name, v);
                     }
                     pc = 0;
                 }
@@ -465,7 +481,7 @@ impl DocumentData {
                     );
 
                     labels_for_instr.push((
-                        self.text[name.node.byte_range()].to_owned(),
+                        &text[name.node.byte_range()],
                         statement.node.range(),
                         name.node.range(),
                     ));
@@ -493,10 +509,10 @@ impl DocumentData {
                     let defines = program
                         .as_mut()
                         .map(|(_, v)| &mut v.defines)
-                        .unwrap_or(&mut self.global_defines);
+                        .unwrap_or(&mut global_defines);
 
                     defines.insert(
-                        self.text[name.node.byte_range()].to_owned(),
+                        &text[name.node.byte_range()],
                         ProgramDefine {
                             statement_range: statement.node.range(),
                             value_range: value.node.range(),
@@ -507,7 +523,7 @@ impl DocumentData {
                 /*label ref*/
                 4 => {
                     if let Some((p, _)) = program.as_ref() {
-                        label_refs.push((m.captures[0].node, p.to_owned()));
+                        label_refs.push((m.captures[0].node, *p));
                     }
                 }
                 _ => unreachable!(),
@@ -515,15 +531,14 @@ impl DocumentData {
         }
         if let Some((name, v)) = program {
             self.inlay_hints.push(v.prog_hint());
-            self.programs.insert(name, v);
+            programs.insert(name, v);
         }
 
         // insert label references into ProgramInfo and generate inlay hint
         // TODO: do this in single pass
         for (n, program) in label_refs {
-            let text = &self.text[n.byte_range()];
-            if let Some(l) = self
-                .programs
+            let text = &text[n.byte_range()];
+            if let Some(l) = programs
                 .get_mut(&program)
                 .and_then(|v| v.labels.get_mut(text))
             {
@@ -540,12 +555,22 @@ impl DocumentData {
                 l.references.push(ts_range_to_lsp(n.range()));
             }
         }
+
+        // free up memory if the number of inlay hints shrinks
+        self.inlay_hints.shrink_to_fit();
+
+        Programs {
+            programs,
+            global_defines,
+        }
     }
 
     // TODO: delay / sideset, directives
     /// generate hover documentation for instructions
     fn hover_instr(&self, mut node: Node<'_>) -> Option<String> {
         use crate::doc::*;
+
+        let doc_text = self.programs.backing_cart();
 
         // check if hovering op keyword (jmp, wait, ...) or in an unspecified part of the instruction
         let kind = node.kind();
@@ -558,21 +583,24 @@ impl DocumentData {
                 let mut cursor = node.walk();
                 node.children(&mut cursor).find(|e| e.kind() == "opcode")?
             };
-            let opcode = self.text[op_node.byte_range()].to_uppercase();
+            let opcode = doc_text[op_node.byte_range()].to_uppercase();
 
             // concatenate docs of all MOV variants
             if opcode == "MOV" {
-                let mut cont = String::new();
-                for (k, d) in INSTRUCTION_DOC.iter().filter(|(k, _)| k.starts_with("MOV")) {
-                    writeln!(&mut cont, "# {k}").unwrap();
-                    cont += d;
-                    cont.push('\n');
+                let mov_it = INSTRUCTION_DOC
+                    .into_iter()
+                    .filter(|(k, _)| k.starts_with("MOV"));
+                let len = mov_it.clone().map(|(k, v)| 4 + k.len() + v.len()).sum();
+                let mut cont = String::with_capacity(len);
+                for (k, d) in mov_it {
+                    writeln!(&mut cont, "# {k}\n{d}").unwrap();
                 }
+                debug_assert_eq!(len, cont.len());
                 return Some(cont);
             }
 
             // return doc for instruction
-            if let Some((_, d)) = INSTRUCTION_DOC.iter().find(|e| e.0 == opcode) {
+            if let Some((_, d)) = INSTRUCTION_DOC.into_iter().find(|e| e.0 == opcode) {
                 return Some(d.to_string());
             }
         }
@@ -596,7 +624,7 @@ impl DocumentData {
             })?;
 
         // opcode text
-        let opcode = self.text[opcode.byte_range()].to_uppercase();
+        let opcode = doc_text[opcode.byte_range()].to_uppercase();
         log::debug!("opcode is {opcode}");
 
         // try find operand dependent of the instruction node (this moves up the tree to the operand position in case we are in an expression)
@@ -608,11 +636,11 @@ impl DocumentData {
         }
 
         // find Assembler Syntax table for instruction and try match with node
-        let (_, d) = INSTRUCTIONS.iter().find(|(k, _)| k == &opcode)?;
+        let (_, d) = INSTRUCTIONS.into_iter().find(|(k, _)| k == &opcode)?;
         log::debug!("found asm table for {opcode}");
 
         // literal text (e.g., block, noblock)
-        let node_text = self.text[node.byte_range()].to_lowercase();
+        let node_text = doc_text[node.byte_range()].to_lowercase();
         if let Some((_, literal)) = d.iter().find(|(k, _)| k == &node_text) {
             log::debug!("found literal {literal}");
             return Some(literal.to_string());
@@ -642,7 +670,7 @@ impl DocumentData {
             // handle wait special cases
             if opcode == "WAIT" && operand == "source" {
                 if instr_path[0].kind() == "src" {
-                    return Some("gpio | pin | irq ( prev | next ) | jmppin".to_owned());
+                    return Some("gpio | pin | irq ( prev | next ) | jmppin".to_string());
                 }
 
                 for e in ["gpio_num", "pin_num", "irq_num"] {
@@ -725,7 +753,7 @@ fn main_loop(
     connection: Connection,
     pioasm: Option<&Path>,
 ) -> std::result::Result<(), Box<dyn Error + Sync + Send>> {
-    let mut docs = BTreeMap::new();
+    let mut docs = HashMap::default();
     let mut parser = pio_parser();
 
     for msg in &connection.receiver {
@@ -759,7 +787,7 @@ fn parse_node_params<T: Notification>(
 fn handle_notification(
     conn: &Connection,
     note: &lsp_server::Notification,
-    docs: &mut BTreeMap<Uri, DocumentData>,
+    docs: &mut HashMap<Uri, DocumentData>,
     pioasm: Option<&Path>,
     parser: &mut tree_sitter::Parser,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -780,10 +808,14 @@ fn handle_notification(
             // saved file, check with pioasm
 
             let p = parse_node_params::<DidSaveTextDocumentNotification>(note)?;
+            log::info!("{:?}", p.text);
             let uri = p.text_document.uri;
             let doc = docs
                 .get_mut(&uri)
                 .ok_or_else(|| format!("no doc for {uri}"))?;
+            if let Some(t) = p.text {
+                assert_eq!(t.as_str(), doc.programs.backing_cart().as_str());
+            }
             check_file_pioasm(conn, uri, doc, pioasm)?;
         }
         DidCloseTextDocumentNotification::METHOD => {
@@ -819,7 +851,7 @@ fn handle_notification(
 fn process_request_td<T: Request>(
     conn: &Connection,
     req: &ServerRequest,
-    docs: &BTreeMap<Uri, DocumentData>,
+    docs: &HashMap<Uri, DocumentData>,
     get_td: impl FnOnce(&T::Params) -> &TextDocumentIdentifier,
     process: impl FnOnce(&DocumentData) -> T::Result,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -833,7 +865,7 @@ fn process_request_td<T: Request>(
 fn process_request<T: Request>(
     conn: &Connection,
     req: &ServerRequest,
-    docs: &BTreeMap<Uri, DocumentData>,
+    docs: &HashMap<Uri, DocumentData>,
     get_tdp: impl FnOnce(&T::Params) -> &TextDocumentPositionParams,
     process: impl FnOnce(&T::Params, &DocumentData, &Uri, Position) -> T::Result,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -909,10 +941,8 @@ fn handle_rename_req(
                 })
                 .collect();
 
-            let mut changes = HashMap::new();
-            changes.insert(uri.clone(), edits);
             WorkspaceEdit {
-                changes: Some(changes),
+                changes: Some(std::iter::once((uri.clone(), edits)).collect()),
                 document_changes: None,
                 change_annotations: None,
             }
@@ -955,7 +985,7 @@ fn handle_hover_req(_: &HoverParams, doc: &DocumentData, _: &Uri, pos: Position)
 fn handle_request(
     conn: &Connection,
     req: &ServerRequest,
-    docs: &BTreeMap<Uri, DocumentData>,
+    docs: &HashMap<Uri, DocumentData>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let parsed: LspRequestMethod<'_> = req.method.as_str().into();
     match parsed {
@@ -1000,9 +1030,10 @@ fn handle_request(
             docs,
             |p| &p.text_document,
             |doc| {
+                let doc_text = doc.programs.backing_cart();
                 Some(vec![TextEdit {
-                    range: full_range(&doc.text),
-                    new_text: format_tree(&doc.text, doc.tree.root_node()),
+                    range: full_range(doc_text),
+                    new_text: format_tree(doc_text, doc.tree.root_node()),
                 }])
             },
         ),
@@ -1042,7 +1073,7 @@ fn check_file_pioasm(
         ..Default::default()
     };
 
-    match run_pioasm(&doc.text, pioasm) {
+    match run_pioasm(doc.programs.backing_cart(), pioasm) {
         Ok(out) => {
             // pioasm does not support non ASCII input and may output "invalid character: " of the individual UTF-8 bytes which may not be valid ASCII
             // so the output is not be valid UTF-8 then
@@ -1259,7 +1290,7 @@ start:
 "#;
         let doc = doc(src);
 
-        let prog = doc.programs.get("test").unwrap();
+        let prog = doc.programs.get().programs.get("test").unwrap();
         assert_eq!(prog.instr_count, 4);
     }
 
@@ -1356,10 +1387,10 @@ start:
     nop
 "#);
 
-        let formatted = format_tree(&d.text, d.tree.root_node());
+        let formatted = format_tree(d.programs.backing_cart(), d.tree.root_node());
 
         let doc2 = doc(&formatted);
-        let formatted2 = format_tree(&doc2.text, doc2.tree.root_node());
+        let formatted2 = format_tree(doc2.programs.backing_cart(), doc2.tree.root_node());
 
         assert_eq!(formatted, formatted2);
     }
@@ -1381,7 +1412,7 @@ set x 23
     set x, 23
 "#;
 
-        let formatted = format_tree(&doc.text, doc.tree.root_node());
+        let formatted = format_tree(doc.programs.backing_cart(), doc.tree.root_node());
         assert_eq!(formatted, expected);
     }
 
