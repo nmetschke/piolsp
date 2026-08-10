@@ -8,6 +8,10 @@ repository = "https://github.com/nmetschke/piolsp"
 license = "MIT"
 keywords = ["language-server", "lsp", "pio"]
 
+[[bench]]
+harness = false
+name = "lsp"
+
 [dependencies]
 foldhash = "0.2.0"
 gen-lsp-types = "0.11"
@@ -26,6 +30,7 @@ yoke = { version = "0.8", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
 pretty_assertions = "1.4"
 
 [profile.release]
