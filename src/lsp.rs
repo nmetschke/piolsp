@@ -72,61 +72,61 @@ fn get_instruction(node: Node) -> Option<Vec<Node>> {
 
 /// label or .define
 #[derive(Debug)]
-enum SymbolType<'a> {
+pub enum SymbolType<'a> {
     Define { value: &'a str },
     Label,
 }
 
 // value and position for .define and <label>:
 #[derive(Debug)]
-struct SymbolDefinition<'a> {
+pub struct SymbolDefinition<'a> {
     /// range of the full statement (e.g., "foo:" or ".define foo 32")
-    statement_range: Range,
+    pub statement_range: Range,
     /// name of the definition (e.g., "foo" for "foo:" or ".define foo 32")
-    text: &'a str,
+    pub text: &'a str,
     /// range of the name (same as above, as LSP type)
-    name_range: Range,
+    pub name_range: Range,
     /// the program that this definition is part of
-    program: Option<&'a str>,
+    pub program: Option<&'a str>,
     /// label or .define
-    typ: SymbolType<'a>,
+    pub typ: SymbolType<'a>,
 }
 
 /// ts declaration of define (.define)
 #[derive(Debug)]
-struct ProgramDefine {
+pub struct ProgramDefine {
     /// range of the full statement (e.g., ".define foo 32")
-    statement_range: tree_sitter::Range,
+    pub statement_range: tree_sitter::Range,
     /// range of the name (e.g., "foo" for ".define foo 32")
-    name_range: tree_sitter::Range,
+    pub name_range: tree_sitter::Range,
     /// range of the value (e.g., "32" for ".define foo 32")
-    value_range: tree_sitter::Range,
+    pub value_range: tree_sitter::Range,
 }
 
 /// ts declaration of label (<label>:)
 #[derive(Debug)]
-struct ProgramLabel {
+pub struct ProgramLabel {
     /// range of the full statement (e.g., "foo:")
-    statement_range: tree_sitter::Range,
+    pub statement_range: tree_sitter::Range,
     /// name of the definition (e.g., "foo" for "foo:")
-    name_range: tree_sitter::Range,
+    pub name_range: tree_sitter::Range,
     /// index of the instruction the label is referencing
-    instr_pc: u8,
+    pub instr_pc: u8,
     /// all references to this label
-    references: Vec<Range>,
+    pub references: Vec<Range>,
 }
 
 /// ts declaration of program (.program)
 #[derive(Debug)]
-struct ProgramInfo<'a> {
+pub struct ProgramInfo<'a> {
     /// range of the full statement (e.g., ".program foo")
-    statement_range: Range,
+    pub statement_range: Range,
     /// number of instructions
-    instr_count: u8,
+    pub instr_count: u8,
     /// defines indexed by their name
-    defines: HashMap<&'a str, ProgramDefine>,
+    pub defines: HashMap<&'a str, ProgramDefine>,
     /// defines indexed by their name
-    labels: HashMap<&'a str, ProgramLabel>,
+    pub labels: HashMap<&'a str, ProgramLabel>,
 }
 impl<'a> ProgramInfo<'a> {
     fn new(statement_range: Range) -> Self {
@@ -155,26 +155,26 @@ impl<'a> ProgramInfo<'a> {
 
 /// programs and global defines
 #[derive(Yokeable, Default)]
-struct Programs<'a> {
+pub struct Programs<'a> {
     /// programs in file index my name
-    programs: HashMap<&'a str, ProgramInfo<'a>>,
+    pub programs: HashMap<&'a str, ProgramInfo<'a>>,
     /// defines before the first program
-    global_defines: HashMap<&'a str, ProgramDefine>,
+    pub global_defines: HashMap<&'a str, ProgramDefine>,
 }
 
 /// loaded pio file
-struct DocumentData {
+pub struct DocumentData {
     /// parsed tree-sitter tree
     tree: tree_sitter::Tree,
     /// active inlay hints
     inlay_hints: Vec<InlayHint>,
     /// programs and global defines, use Yoke so the struct can be self referential and avoid cloning
-    programs: Yoke<Programs<'static>, String>,
+    pub programs: Yoke<Programs<'static>, String>,
 
     cursor: QueryCursor,
 }
 impl DocumentData {
-    fn new(parser: &mut tree_sitter::Parser, text: String) -> Self {
+    pub fn new(parser: &mut tree_sitter::Parser, text: String) -> Self {
         let mut this = Self {
             programs: Yoke::attach_to_cart(String::new(), |_| Programs::default()),
             tree: parser.parse("", None).unwrap(),
@@ -186,7 +186,7 @@ impl DocumentData {
     }
 
     /// update doc content and reanalyze
-    fn update(&mut self, parser: &mut tree_sitter::Parser, text: String) {
+    pub fn update(&mut self, parser: &mut tree_sitter::Parser, text: String) {
         self.tree = parser.parse(&text, None).unwrap();
 
         let programs = self.programs.get();
@@ -197,7 +197,7 @@ impl DocumentData {
     }
 
     /// find node at the cursor position
-    fn node_at(&self, position: Position) -> Option<Node<'_>> {
+    pub fn node_at(&self, position: Position) -> Option<Node<'_>> {
         let p = lsp_pos_to_ts(position);
         self.tree.root_node().descendant_for_point_range(p, p)
     }
@@ -236,7 +236,7 @@ impl DocumentData {
     }
 
     /// find definition of a .define statement or label
-    fn get_definition<'a>(&'a self, node: Node) -> Option<SymbolDefinition<'a>> {
+    pub fn get_definition<'a>(&'a self, node: Node) -> Option<SymbolDefinition<'a>> {
         if node.kind() != "symbol" {
             return None;
         }
@@ -293,7 +293,7 @@ impl DocumentData {
     }
 
     // find all references to a symbol. return the name of the definition (as range) and all references
-    fn get_references(&self, node: Node) -> Option<(Range, Vec<Range>)> {
+    pub fn get_references(&self, node: Node) -> Option<(Range, Vec<Range>)> {
         static DEFINE_REFERENCE: LazyLock<tree_sitter::Query> = LazyLock::new(|| {
             pio_query(
                 r#"
@@ -358,7 +358,11 @@ impl DocumentData {
     }
 
     /// look for the things the lsp in interested like "jump to definition" and inlay hints and populate self
-    fn analyze_programs<'a>(&mut self, text: &'a str, size_hint: (usize, usize)) -> Programs<'a> {
+    pub fn analyze_programs<'a>(
+        &mut self,
+        text: &'a str,
+        size_hint: (usize, usize),
+    ) -> Programs<'a> {
         // search for .program statements or instructions
         static PROG_INSTR_QUERY: LazyLock<tree_sitter::Query> = LazyLock::new(|| {
             pio_query(
