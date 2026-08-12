@@ -27,7 +27,10 @@ fn criterion_benchmark(c: &mut Criterion) {
         });
     });
     c.bench_function("DocumentData::update", |b| {
-        b.iter(|| d.update(&mut p, black_box(t.clone())));
+        b.iter(|| d.update(&mut p, black_box(t.clone()), None));
+    });
+    c.bench_function("DocumentData::update_partial", |b| {
+        b.iter(|| d.update(&mut p, black_box(t.clone()), Some(d.tree.clone()).as_ref()));
     });
 
     let t = String::from_utf8(

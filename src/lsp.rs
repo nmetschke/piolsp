@@ -165,7 +165,7 @@ pub struct Programs<'a> {
 /// loaded pio file
 pub struct DocumentData {
     /// parsed tree-sitter tree
-    tree: tree_sitter::Tree,
+    pub tree: tree_sitter::Tree,
     /// active inlay hints
     inlay_hints: Vec<InlayHint>,
     /// programs and global defines, use Yoke so the struct can be self referential and avoid cloning
@@ -174,20 +174,29 @@ pub struct DocumentData {
     cursor: QueryCursor,
 }
 impl DocumentData {
+    fn default_yoke() -> Yoke<Programs<'static>, String> {
+        Yoke::attach_to_cart(String::new(), |_| Programs::default())
+    }
+
     pub fn new(parser: &mut tree_sitter::Parser, text: String) -> Self {
         let mut this = Self {
-            programs: Yoke::attach_to_cart(String::new(), |_| Programs::default()),
+            programs: Self::default_yoke(),
             tree: parser.parse("", None).unwrap(),
             inlay_hints: Vec::new(),
             cursor: QueryCursor::new(),
         };
-        this.update(parser, text);
+        this.update(parser, text, None);
         this
     }
 
     /// update doc content and reanalyze
-    pub fn update(&mut self, parser: &mut tree_sitter::Parser, text: String) {
-        self.tree = parser.parse(&text, None).unwrap();
+    pub fn update(
+        &mut self,
+        parser: &mut tree_sitter::Parser,
+        text: String,
+        old_tree: Option<&tree_sitter::Tree>,
+    ) {
+        self.tree = parser.parse(&text, old_tree).unwrap();
 
         let programs = self.programs.get();
         let size_hint = (programs.programs.len(), programs.global_defines.len());
@@ -702,7 +711,7 @@ impl DocumentData {
 }
 
 pub fn lsp(pioasm: Option<PathBuf>) -> std::result::Result<(), Box<dyn Error + Sync + Send>> {
-    log::info!("starting piolsp");
+    log::info!("starting piolsp {}", env!("CARGO_PKG_VERSION"));
 
     // transport
     let (connection, io_thread) = Connection::stdio();
@@ -727,7 +736,7 @@ pub fn lsp(pioasm: Option<PathBuf>) -> std::result::Result<(), Box<dyn Error + S
     // advertised capabilities
     let caps = ServerCapabilities {
         position_encoding: Some(PositionEncodingKind::UTF8),
-        text_document_sync: Some(TextDocumentSync::Kind(TextDocumentSyncKind::Full)), // TODO: partial sync
+        text_document_sync: Some(TextDocumentSync::Kind(TextDocumentSyncKind::Incremental)),
 
         definition_provider: Some(DefinitionProvider::Bool(true)),
         references_provider: Some(ReferencesProvider::Bool(true)),
@@ -783,6 +792,115 @@ fn main_loop(
     Ok(())
 }
 
+fn range_to_offset(document: &str, range: Range) -> std::ops::Range<usize> {
+    log::info!("r = {range:?}");
+    log::info!("doc = {document:?}");
+
+    let mut line_start = 0;
+    let mut byte_range = [(range.start, !0), (range.end, !0)];
+
+    // need to include '\n'
+    let mut line_count = 0;
+    for line_text in document.split_inclusive('\n') {
+        for (pos, found) in &mut byte_range {
+            if line_count == pos.line as usize {
+                debug_assert!(line_text.len() >= pos.character as usize,);
+                #[cfg(debug_assertions)]
+                if !line_text.is_char_boundary(pos.character as _) {
+                    log::error!("{}:{} is not a UTF-8 boundary", pos.line, pos.character);
+                }
+                *found = line_start + pos.character as usize;
+            }
+        }
+        let (start, end) = (byte_range[0].1, byte_range[1].1);
+        if start != !0 && end != !0 {
+            return start..end;
+        }
+
+        line_start += line_text.len();
+        line_count += 1;
+    }
+
+    // check if range is last \n
+    for (pos, found) in &mut byte_range {
+        if line_count == pos.line as usize && pos.character == 0 {
+            *found = line_start;
+        }
+    }
+    let (start, end) = (byte_range[0].1, byte_range[1].1);
+    if start != !0 && end != !0 {
+        return start..end;
+    }
+
+    // this should never happen if the client follows spec
+    log::error!("range is past end of document {line_count } {byte_range:?}");
+
+    // something went wrong, clamp to document size
+    start.min(document.len())..end.min(document.len())
+}
+
+fn point_after_insert(start: tree_sitter::Point, inserted: &str) -> tree_sitter::Point {
+    let newline_count = memchr::memchr_iter(b'\n', inserted.as_bytes()).count();
+    if newline_count == 0 {
+        tree_sitter::Point {
+            row: start.row,
+            column: start.column + inserted.len(),
+        }
+    } else {
+        let last_line = inserted.rsplit('\n').next().unwrap();
+        tree_sitter::Point {
+            row: start.row + newline_count,
+            column: last_line.len(),
+        }
+    }
+}
+
+fn apply_doc_changes(
+    doc: &mut String,
+    mut changes: Vec<TextDocumentContentChangeEvent>,
+) -> Option<Vec<tree_sitter::InputEdit>> {
+    if let [
+        TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(
+            TextDocumentContentChangeWholeDocument { text },
+        ),
+    ] = changes.as_mut_slice()
+    {
+        *doc = std::mem::take(text);
+        return None;
+    };
+
+    log::warn!("{:?}", changes);
+    let mut tree_edits = Some(Vec::new());
+    for change in changes {
+        match change {
+            TextDocumentContentChangeEvent::TextDocumentContentChangePartial(
+                TextDocumentContentChangePartial { range, text, .. },
+            ) => {
+                let r = range_to_offset(doc, range);
+                doc.replace_range(r.clone(), &text);
+                if let Some(tree_edits) = tree_edits.as_mut() {
+                    tree_edits.push(tree_sitter::InputEdit {
+                        start_byte: r.start,
+                        old_end_byte: r.end,
+                        new_end_byte: r.start + text.len(),
+                        start_position: lsp_pos_to_ts(range.start),
+                        old_end_position: lsp_pos_to_ts(range.end),
+                        new_end_position: point_after_insert(lsp_pos_to_ts(range.start), &text),
+                    });
+                }
+            }
+            TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(
+                TextDocumentContentChangeWholeDocument { text },
+            ) => {
+                log::warn!("unexpected TextDocumentContentChangeWholeDocument");
+                *doc = text;
+                tree_edits = None;
+            }
+        }
+    }
+    tree_edits
+}
+
 fn parse_node_params<T: Notification>(
     note: &lsp_server::Notification,
 ) -> Result<T::Params, serde_json::Error> {
@@ -829,23 +947,27 @@ fn handle_notification(
             docs.remove(&p.text_document.uri);
         }
         DidChangeTextDocumentNotification::METHOD => {
-            // source was changed, reparse tree (TODO: incremental update)
+            // source was changed, reparse tree
 
             let p = parse_node_params::<DidChangeTextDocumentNotification>(note)?;
-            if let Some(change) = p.content_changes.into_iter().last() {
-                let uri = p.text_document.text_document_identifier.uri;
-                match change {
-                    TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(
-                        TextDocumentContentChangeWholeDocument { text },
-                    ) => docs
-                        .get_mut(&uri)
-                        .ok_or_else(|| format!("no doc for {uri}"))?
-                        .update(parser, text),
-                    TextDocumentContentChangeEvent::TextDocumentContentChangePartial(_) => {
-                        unimplemented!()
-                    }
-                };
-            }
+            let uri = p.text_document.text_document_identifier.uri;
+
+            let doc = docs
+                .get_mut(&uri)
+                .ok_or_else(|| format!("no doc for {uri}"))?;
+
+            let mut text = std::mem::replace(&mut doc.programs, DocumentData::default_yoke())
+                .into_backing_cart();
+
+            let tree_edits = apply_doc_changes(&mut text, p.content_changes);
+            let old_tree = tree_edits.map(|edits| {
+                let mut tree = doc.tree.clone(); // TODO
+                for edit in edits {
+                    tree.edit(&edit);
+                }
+                tree
+            });
+            doc.update(parser, text, old_tree.as_ref());
         }
         e => log::debug!("ignoring notification {e:?}"),
     }
@@ -1581,5 +1703,43 @@ set x 23
         );
         test_hover("set x 1", 4, "Is one of the destinations specified above.");
         test_hover("set x 1", 6, "The value to set");
+    }
+
+    #[test]
+    fn test_partial_update() {
+        let mut doc = r#".program p
+nop
+set x 23
+"#
+        .to_owned();
+
+        let changes = [
+            (0, 10, 0, 10, "\njmp 3"),
+            (2, 0, 3, 0, ""),
+            (2, 8, 2, 8, "\nnop"),
+            (2, 3, 2, 4, "1"),
+            (2, 3, 2, 4, " "),
+            (2, 4, 2, 5, "y"),
+        ]
+        .into_iter()
+        .map(|(start_l, start_c, end_l, end_c, text)| {
+            TextDocumentContentChangeEvent::TextDocumentContentChangePartial(
+                TextDocumentContentChangePartial::new(
+                    Range::new(Position::new(start_l, start_c), Position::new(end_l, end_c)),
+                    None,
+                    text.to_string(),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+        apply_doc_changes(&mut doc, changes);
+
+        let doc_new = r#".program p
+jmp 3
+set y 23
+nop
+"#;
+
+        assert_eq!(doc, doc_new);
     }
 }
