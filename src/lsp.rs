@@ -3,6 +3,7 @@ use foldhash::{HashMap, HashMapExt};
 use gen_lsp_types::*;
 use lsp_server::{Connection, Message, Request as ServerRequest, RequestId, Response};
 use regex::Regex;
+use std::borrow::Cow;
 use std::fmt::Write;
 use std::{
     error::Error,
@@ -302,7 +303,7 @@ impl DocumentData {
     }
 
     // find all references to a symbol. return the name of the definition (as range) and all references
-    pub fn get_references(&self, node: Node) -> Option<(Range, Vec<Range>)> {
+    pub fn get_references<'a>(&'a self, node: Node) -> Option<(Range, Cow<'a, [Range]>)> {
         static DEFINE_REFERENCE: LazyLock<tree_sitter::Query> = LazyLock::new(|| {
             pio_query(
                 r#"
@@ -326,7 +327,7 @@ impl DocumentData {
 
         let references = match definition.typ {
             SymbolType::Define { .. } => {
-                // compute defines only when needed
+                // compute defines only when needed (TODO: cache)
                 let mut cursor = QueryCursor::new();
                 let mut it = cursor.matches(
                     &DEFINE_REFERENCE,
@@ -351,16 +352,16 @@ impl DocumentData {
                         _ => {}
                     }
                 }
-                refs
+                Cow::Owned(refs)
             }
-            SymbolType::Label => definition
-                .program
-                .map(|p| {
-                    self.programs.get().programs[p].labels[definition.text]
-                        .references
-                        .clone()
-                })
-                .unwrap_or_default(),
+            SymbolType::Label => Cow::Borrowed(
+                definition
+                    .program
+                    .map(
+                        |p| &self.programs.get().programs[p].labels[definition.text].references[..],
+                    )
+                    .unwrap_or_default(),
+            ),
         };
 
         Some((definition.name_range, references))
@@ -749,6 +750,7 @@ pub fn lsp(pioasm: Option<PathBuf>) -> std::result::Result<(), Box<dyn Error + S
                 .and_then(|e| e.prepare_support),
             ..Default::default()
         })),
+        document_highlight_provider: Some(DocumentHighlightProvider::Bool(true)),
 
         // completion_provider: Some(CompletionOptions::default()),
         ..Default::default()
@@ -1032,7 +1034,7 @@ fn handle_references_req(
                 .include_declaration
                 .then_some(def)
                 .into_iter()
-                .chain(refs)
+                .chain(refs.iter().copied())
                 .map(|range| Location {
                     uri: uri.clone(),
                     range,
@@ -1060,13 +1062,12 @@ fn handle_rename_req(
         .and_then(|n| doc.get_references(n))
         .map(|(def, refs)| {
             let edits = std::iter::once(def)
-                .chain(refs)
+                .chain(refs.iter().copied())
                 .map(|range| TextEdit {
                     range,
                     new_text: params.new_name.clone(),
                 })
                 .collect();
-
             WorkspaceEdit {
                 changes: Some(std::iter::once((uri.clone(), edits)).collect()),
                 document_changes: None,
@@ -1106,6 +1107,26 @@ fn handle_hover_req(_: &HoverParams, doc: &DocumentData, _: &Uri, pos: Position)
     }
 
     None
+}
+fn handle_highlight_req(
+    _: &DocumentHighlightParams,
+    doc: &DocumentData,
+    _: &Uri,
+    pos: Position,
+) -> Option<Vec<DocumentHighlight>> {
+    doc.node_at(pos)
+        .and_then(|n| doc.get_references(n))
+        .map(|(def, refs)| {
+            std::iter::once(DocumentHighlight::new(
+                def,
+                Some(DocumentHighlightKind::Write),
+            ))
+            .chain(
+                refs.iter()
+                    .map(|&range| DocumentHighlight::new(range, Some(DocumentHighlightKind::Read))),
+            )
+            .collect()
+        })
 }
 
 fn handle_request(
@@ -1150,6 +1171,14 @@ fn handle_request(
             |p| &p.text_document_position_params,
             handle_hover_req,
         ),
+        DocumentHighlightRequest::METHOD => process_request::<DocumentHighlightRequest>(
+            conn,
+            req,
+            docs,
+            |p| &p.text_document_position_params,
+            handle_highlight_req,
+        ),
+
         DocumentFormattingRequest::METHOD => process_request_td::<DocumentFormattingRequest>(
             conn,
             req,
