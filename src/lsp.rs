@@ -71,11 +71,23 @@ fn get_instruction(node: Node) -> Option<Vec<Node>> {
     None
 }
 
+#[derive(Debug, PartialEq)]
+pub struct NamedSymbol<'a> {
+    /// name of the definition (e.g., "foo" for "foo:" or ".define foo 32")
+    pub text: &'a str,
+    /// range of the name (same as above, as LSP type)
+    pub name_range: Range,
+}
+
 /// label or .define
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum SymbolType<'a> {
-    Define { value: &'a str },
-    Label,
+    Define {
+        value: &'a str,
+        named: NamedSymbol<'a>,
+    },
+    Label(NamedSymbol<'a>),
+    Wrap,
 }
 
 // value and position for .define and <label>:
@@ -83,14 +95,27 @@ pub enum SymbolType<'a> {
 pub struct SymbolDefinition<'a> {
     /// range of the full statement (e.g., "foo:" or ".define foo 32")
     pub statement_range: Range,
-    /// name of the definition (e.g., "foo" for "foo:" or ".define foo 32")
-    pub text: &'a str,
-    /// range of the name (same as above, as LSP type)
-    pub name_range: Range,
     /// the program that this definition is part of
     pub program: Option<&'a str>,
-    /// label or .define
+    /// label, .define, .wrap, .wrap_target
     pub typ: SymbolType<'a>,
+}
+
+impl<'a> SymbolDefinition<'a> {
+    pub const fn text(&self) -> Option<&str> {
+        match &self.typ {
+            SymbolType::Define { value: _, named } => Some(named.text),
+            SymbolType::Label(named) => Some(named.text),
+            SymbolType::Wrap => None,
+        }
+    }
+    pub const fn name_range(&self) -> Option<Range> {
+        match &self.typ {
+            SymbolType::Define { value: _, named } => Some(named.name_range),
+            SymbolType::Label(named) => Some(named.name_range),
+            SymbolType::Wrap => None,
+        }
+    }
 }
 
 /// ts declaration of define (.define)
@@ -118,7 +143,7 @@ pub struct ProgramLabel {
 }
 
 /// ts declaration of program (.program)
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ProgramInfo<'a> {
     /// range of the full statement (e.g., ".program foo")
     pub statement_range: Range,
@@ -128,14 +153,16 @@ pub struct ProgramInfo<'a> {
     pub defines: HashMap<&'a str, ProgramDefine>,
     /// defines indexed by their name
     pub labels: HashMap<&'a str, ProgramLabel>,
+    /// location of .wrap
+    pub wrap: Option<Range>,
+    /// location of .wrap_target
+    pub wrap_target: Option<Range>,
 }
 impl<'a> ProgramInfo<'a> {
     fn new(statement_range: Range) -> Self {
         Self {
             statement_range,
-            instr_count: 0,
-            defines: HashMap::default(),
-            labels: HashMap::default(),
+            ..Default::default()
         }
     }
 
@@ -247,8 +274,24 @@ impl DocumentData {
 
     /// find definition of a .define statement or label
     pub fn get_definition<'a>(&'a self, node: Node) -> Option<SymbolDefinition<'a>> {
-        if node.kind() != "symbol" {
-            return None;
+        let kind = node.kind();
+        match kind {
+            "symbol" => {}
+            "directive_wrap" | "directive_wrap_target" => {
+                let prog_name = self.program_at(node.parent()?)?;
+                let program = self.programs.get().programs.get(prog_name)?;
+                return Some(SymbolDefinition {
+                    statement_range: program.wrap_target?,
+
+                    // statement_range: match kind {
+                    //     "directive_wrap" => program.wrap?,
+                    //     _ => program.wrap_target?,
+                    // },
+                    program: Some(prog_name),
+                    typ: SymbolType::Wrap,
+                });
+            }
+            _ => return None,
         }
 
         log::debug!("searching for definition of {node}");
@@ -273,11 +316,12 @@ impl DocumentData {
         if is_label && let Some(label) = prog.and_then(|p| p.labels.get(node_text)) {
             log::debug!("found label");
             return Some(SymbolDefinition {
-                text: node_text,
                 statement_range: ts_range_to_lsp(label.statement_range),
-                name_range: ts_range_to_lsp(label.name_range),
                 program,
-                typ: SymbolType::Label,
+                typ: SymbolType::Label(NamedSymbol {
+                    text: node_text,
+                    name_range: ts_range_to_lsp(label.name_range),
+                }),
             });
         }
 
@@ -292,12 +336,14 @@ impl DocumentData {
 
         log::debug!("found define");
         Some(SymbolDefinition {
-            text: node_text,
             statement_range: ts_range_to_lsp(pd.statement_range),
-            name_range: ts_range_to_lsp(pd.name_range),
             program,
             typ: SymbolType::Define {
                 value: &doc_text[pd.value_range.start_byte..pd.value_range.end_byte],
+                named: NamedSymbol {
+                    text: node_text,
+                    name_range: ts_range_to_lsp(pd.name_range),
+                },
             },
         })
     }
@@ -325,8 +371,8 @@ impl DocumentData {
 
         let doc_text = self.programs.backing_cart();
 
-        let references = match definition.typ {
-            SymbolType::Define { .. } => {
+        let (name_range, references) = match &definition.typ {
+            SymbolType::Define { named, value: _ } => {
                 // compute defines only when needed (TODO: cache)
                 let mut cursor = QueryCursor::new();
                 let mut it = cursor.matches(
@@ -345,26 +391,36 @@ impl DocumentData {
                             program = Some(&doc_text[n.byte_range()])
                         }
                         1 if program == definition.program
-                            && &doc_text[n.byte_range()] == definition.text =>
+                            && Some(&doc_text[n.byte_range()]) == definition.text() =>
                         {
                             refs.push(ts_range_to_lsp(n.range()))
                         }
                         _ => {}
                     }
                 }
-                Cow::Owned(refs)
+                (named.name_range, Cow::Owned(refs))
             }
-            SymbolType::Label => Cow::Borrowed(
-                definition
-                    .program
-                    .map(
-                        |p| &self.programs.get().programs[p].labels[definition.text].references[..],
-                    )
-                    .unwrap_or_default(),
+            SymbolType::Label(named) => (
+                named.name_range,
+                Cow::Borrowed(
+                    definition
+                        .program
+                        .map(|p| &self.programs.get().programs[p].labels[named.text].references[..])
+                        .unwrap_or_default(),
+                ),
             ),
+            SymbolType::Wrap => {
+                let p = definition
+                    .program
+                    .map(|p| &self.programs.get().programs[p])?;
+                (
+                    p.wrap_target?,
+                    Cow::Borrowed(std::slice::from_ref(p.wrap.as_ref()?)),
+                )
+            }
         };
 
-        Some((definition.name_range, references))
+        Some((name_range, references))
     }
 
     /// look for the things the lsp in interested like "jump to definition" and inlay hints and populate self
@@ -396,6 +452,9 @@ impl DocumentData {
 
 (label_reference (value)                        @label_ref
 )
+
+(directive (directive_wrap))                    @wrap
+(directive (directive_wrap_target))             @wrap_target
 "#,
             )
         });
@@ -540,6 +599,18 @@ impl DocumentData {
                         label_refs.push((m.captures[0].node, *p));
                     }
                 }
+                /*.wrap*/
+                /*.wrap_target*/
+                5 | 6 => {
+                    if let Some((_, p)) = program.as_mut() {
+                        *(if m.pattern_index == 5 {
+                            &mut p.wrap
+                        } else {
+                            &mut p.wrap_target
+                        }) = Some(ts_range_to_lsp(m.captures[0].node.range()));
+                    }
+                }
+
                 _ => unreachable!(),
             }
         }
@@ -1048,9 +1119,11 @@ fn handle_prepare_rename_req(
     _: &Uri,
     pos: Position,
 ) -> Option<PrepareRenameResult> {
-    doc.node_at(pos)
-        .and_then(|sym| doc.get_definition(sym))
-        .map(|d| PrepareRenameResult::Range(d.name_range))
+    doc.node_at(pos).and_then(|sym| {
+        Some(PrepareRenameResult::Range(
+            doc.get_definition(sym).and_then(|d| d.name_range())?,
+        ))
+    })
 }
 fn handle_rename_req(
     params: &RenameParams,
@@ -1461,10 +1534,10 @@ start:
         let pos = Position::new(3, 13); // somewhere on FOO
         let node = doc.node_at(pos).unwrap();
         let def = doc.get_definition(node).unwrap();
-        assert_eq!(def.text, "FOO");
+        assert_eq!(def.text(), Some("FOO"));
 
         match def.typ {
-            SymbolType::Define { value } => assert_eq!(value, "2"),
+            SymbolType::Define { value, named: _ } => assert_eq!(value, "2"),
             _ => panic!("expected define"),
         }
     }
@@ -1486,11 +1559,11 @@ start:
         let def = doc.get_definition(node).unwrap();
 
         match def.typ {
-            SymbolType::Label => {}
+            SymbolType::Label(_) => {}
             _ => panic!("expected label"),
         }
 
-        assert_eq!(def.text, "start");
+        assert_eq!(def.text().unwrap(), "start");
     }
 
     #[test]
@@ -1770,5 +1843,49 @@ nop
 "#;
 
         assert_eq!(doc, doc_new);
+    }
+
+    #[test]
+    fn wrap_get_refs() {
+        let doc = doc(r#"
+.program p
+.wrap_target
+    nop
+.wrap
+"#);
+
+        let pos = Position::new(2, 2);
+        let node = doc.node_at(pos).unwrap();
+
+        let (d, refs) = doc.get_references(node).unwrap();
+        assert_eq!(ts_range_to_lsp(node.parent().unwrap().range()), d);
+        assert_eq!(refs.len(), 1);
+    }
+
+    #[test]
+    fn wrap_get_definition() {
+        let doc = doc(r#"
+.program p
+.wrap_target
+    nop
+.wrap
+"#);
+
+        let pos = Position::new(4, 2);
+        let node = doc.node_at(pos).unwrap();
+
+        let sd = doc.get_definition(node).unwrap();
+
+        assert_eq!(sd.typ, SymbolType::Wrap);
+        assert_eq!(
+            sd.statement_range,
+            ts_range_to_lsp(
+                doc.node_at(Position::new(2, 2))
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .range()
+            )
+        );
     }
 }

@@ -1,17 +1,9 @@
-[[language]]
-auto-format = false
-comment-tokens = ";"
-file-types = ["pio"]
-language-servers = ["piolsp"]
-name = "pio"
-scope = "source.pio"
-
 [language-server.piolsp]
 args = [
   "--pioasm",
   "pioasm",
   "--logfile",
   "/tmp/piolsp.log",
-  "--verbose",
+  # "--verbose",
 ]
-command = "./target/debug/piolsp2"
+command = "./target/debug/piolsp"

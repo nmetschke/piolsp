@@ -46,10 +46,10 @@ fn criterion_benchmark(c: &mut Criterion) {
             let pos = Position::new(41 - 1, 14 - 1);
             let node = d.node_at(pos).unwrap();
             let def = d.get_definition(node).unwrap();
-            assert_eq!(def.text, "BIT_SAMPLE_DELAY");
+            assert_eq!(def.text().unwrap(), "BIT_SAMPLE_DELAY");
 
             match def.typ {
-                SymbolType::Define { value } => assert_eq!(value, "15"),
+                SymbolType::Define { value, named: _ } => assert_eq!(value, "15"),
                 _ => panic!("expected define"),
             }
         });

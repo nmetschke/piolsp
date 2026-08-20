@@ -30,7 +30,7 @@ yoke = { version = "0.8", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
+criterion = "0.8"
 pretty_assertions = "1.4"
 
 [profile.release]
