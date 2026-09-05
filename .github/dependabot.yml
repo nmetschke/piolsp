@@ -2,13 +2,25 @@ version: 2
 updates:
   - package-ecosystem: "github-actions"
     directory: "/"
+    groups:
+      dev-dependencies:
+        patterns:
+          - "*"
     schedule:
       interval: "monthly"
   - package-ecosystem: "nix"
     directory: "/"
+    groups:
+      nix-dependencies:
+        patterns:
+          - "*"
     schedule:
       interval: "monthly"
   - package-ecosystem: "cargo"
     directory: "/"
+    groups:
+      cargo-dependencies:
+        patterns:
+          - "*"
     schedule:
       interval: "monthly"
