@@ -385,7 +385,7 @@ impl DocumentData {
                 let mut refs = Vec::new();
                 let mut program = None;
                 while let Some(m) = it.next() {
-                    let n = m.captures[0].node;
+                    let n = m.captures()[0].node;
                     match m.pattern_index {
                         0 if definition.program.is_some() => {
                             program = Some(&doc_text[n.byte_range()])
@@ -474,13 +474,13 @@ impl DocumentData {
             match m.pattern_index {
                 /*program directive*/
                 0 => {
-                    let statement = m.captures[0];
+                    let statement = m.captures()[0];
                     debug_assert_eq!(
                         PROG_INSTR_QUERY.capture_names()[statement.index as usize],
                         "program"
                     );
 
-                    let name = m.captures[1];
+                    let name = m.captures()[1];
                     debug_assert_eq!(
                         PROG_INSTR_QUERY.capture_names()[name.index as usize],
                         "program_name"
@@ -525,7 +525,7 @@ impl DocumentData {
                         }
 
                         // hint with pc for instruction
-                        let position = ts_range_to_lsp(m.captures[0].node.range()).start;
+                        let position = ts_range_to_lsp(m.captures()[0].node.range()).start;
                         self.inlay_hints.push(InlayHint {
                             position,
                             label: Label::String(format!("{pc:02}:")),
@@ -541,13 +541,13 @@ impl DocumentData {
                 }
                 /*label*/
                 2 => {
-                    let statement = m.captures[0];
+                    let statement = m.captures()[0];
                     debug_assert_eq!(
                         PROG_INSTR_QUERY.capture_names()[statement.index as usize],
                         "label_statement"
                     );
 
-                    let name = m.captures[1];
+                    let name = m.captures()[1];
                     debug_assert_eq!(
                         PROG_INSTR_QUERY.capture_names()[name.index as usize],
                         "label_name"
@@ -561,19 +561,19 @@ impl DocumentData {
                 }
                 /*define*/
                 3 => {
-                    let statement = m.captures[0];
+                    let statement = m.captures()[0];
                     debug_assert_eq!(
                         PROG_INSTR_QUERY.capture_names()[statement.index as usize],
                         "define_statement"
                     );
 
-                    let name = m.captures[1];
+                    let name = m.captures()[1];
                     debug_assert_eq!(
                         PROG_INSTR_QUERY.capture_names()[name.index as usize],
                         "define_name"
                     );
 
-                    let value = m.captures[2];
+                    let value = m.captures()[2];
                     debug_assert_eq!(
                         PROG_INSTR_QUERY.capture_names()[value.index as usize],
                         "define_value"
@@ -596,7 +596,7 @@ impl DocumentData {
                 /*label ref*/
                 4 => {
                     if let Some((p, _)) = program.as_ref() {
-                        label_refs.push((m.captures[0].node, *p));
+                        label_refs.push((m.captures()[0].node, *p));
                     }
                 }
                 /*.wrap*/
@@ -607,7 +607,7 @@ impl DocumentData {
                             &mut p.wrap
                         } else {
                             &mut p.wrap_target
-                        }) = Some(ts_range_to_lsp(m.captures[0].node.range()));
+                        }) = Some(ts_range_to_lsp(m.captures()[0].node.range()));
                     }
                 }
 

@@ -1,9 +1,7 @@
 {
   description = "Tree-sitter grammar and queries for Raspberry Pico PIO assembly";
 
-  inputs = {
-    nixpkgs.url = "nixpkgs/nixos-unstable";
-  };
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable-small";
 
   outputs =
     { self, ... }@inputs:
@@ -16,25 +14,18 @@
       forEachSupportedSystem =
         f:
         inputs.nixpkgs.lib.genAttrs supportedSystems (
-          system:
-          f (
-            import inputs.nixpkgs {
-              inherit system;
-            }
-          )
+          system: f (import inputs.nixpkgs { inherit system; })
         );
 
       mkPioLsp = pkgs: pkgs.callPackage ./package.nix { };
     in
     {
-      packages = forEachSupportedSystem (
-        { pkgs, ... }: {
-          default = mkPioLsp pkgs;
-        }
-      );
+      packages = forEachSupportedSystem (pkgs: {
+        default = mkPioLsp pkgs;
+      });
       devShells = forEachSupportedSystem (pkgs: {
         default = pkgs.mkShell {
-          inputsFrom = [ (mkPioLsp pkgs) ];
+          inputsFrom = [ self.packages.${pkgs.stdenv.hostPlatform.system}.default ];
 
           packages = with pkgs; [
             pioasm
