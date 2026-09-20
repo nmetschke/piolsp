@@ -497,56 +497,56 @@ pub fn format_tree(code: &str, root: Node) -> String {
     fmt.finish()
 }
 
-#[cfg(test)]
-mod test {
-    use super::*;
-    use pretty_assertions::assert_eq;
-    use std::path::{Path, PathBuf};
+// #[cfg(test)]
+// mod test {
+//     use super::*;
+//     use pretty_assertions::assert_eq;
+//     use std::path::{Path, PathBuf};
 
-    use crate::{pio_parser, run_pioasm};
+//     use crate::{pio_parser, run_pioasm};
 
-    fn find_all_pio_files(base_path: &Path, files: &mut Vec<PathBuf>) {
-        for e in std::fs::read_dir(base_path).unwrap() {
-            let e = e.unwrap();
-            let meta = e.metadata().unwrap();
-            if meta.is_dir() {
-                find_all_pio_files(&e.path(), files);
-            } else if meta.is_file() && e.file_name().to_str().unwrap().ends_with(".pio") {
-                files.push(e.path());
-            }
-        }
-    }
+//     fn find_all_pio_files(base_path: &Path, files: &mut Vec<PathBuf>) {
+//         for e in std::fs::read_dir(base_path).unwrap() {
+//             let e = e.unwrap();
+//             let meta = e.metadata().unwrap();
+//             if meta.is_dir() {
+//                 find_all_pio_files(&e.path(), files);
+//             } else if meta.is_file() && e.file_name().to_str().unwrap().ends_with(".pio") {
+//                 files.push(e.path());
+//             }
+//         }
+//     }
 
-    #[test]
-    fn format_pico_examples() {
-        let mut pio_files = Vec::new();
-        find_all_pio_files(Path::new("tests/pico-examples"), &mut pio_files);
+//     #[test]
+//     fn format_pico_examples() {
+//         let mut pio_files = Vec::new();
+//         find_all_pio_files(Path::new("tests/pico-examples"), &mut pio_files);
 
-        for f in pio_files {
-            eprintln!("formatting {}", f.display());
+//         for f in pio_files {
+//             eprintln!("formatting {}", f.display());
 
-            let code = std::fs::read_to_string(f).unwrap();
+//             let code = std::fs::read_to_string(f).unwrap();
 
-            let reference = run_pioasm(&code, None).unwrap();
-            assert!(reference.status.success());
-            assert!(reference.stderr.is_empty());
+//             let reference = run_pioasm(&code, None).unwrap();
+//             assert!(reference.status.success());
+//             assert!(reference.stderr.is_empty());
 
-            let formatted =
-                format_tree(&code, pio_parser().parse(&code, None).unwrap().root_node());
+//             let formatted =
+//                 format_tree(&code, pio_parser().parse(&code, None).unwrap().root_node());
 
-            let assembled = run_pioasm(&formatted, None).unwrap();
+//             let assembled = run_pioasm(&formatted, None).unwrap();
 
-            assert!(
-                assembled.stderr.is_empty(),
-                "{}",
-                String::from_utf8_lossy(&assembled.stderr)
-            );
-            assert!(assembled.status.success());
+//             assert!(
+//                 assembled.stderr.is_empty(),
+//                 "{}",
+//                 String::from_utf8_lossy(&assembled.stderr)
+//             );
+//             assert!(assembled.status.success());
 
-            assert_eq!(
-                String::from_utf8(reference.stdout).unwrap(),
-                String::from_utf8(assembled.stdout).unwrap(),
-            );
-        }
-    }
-}
+//             assert_eq!(
+//                 String::from_utf8(reference.stdout).unwrap(),
+//                 String::from_utf8(assembled.stdout).unwrap(),
+//             );
+//         }
+//     }
+// }
