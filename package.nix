@@ -8,6 +8,8 @@ rustPlatform.buildRustPackage {
     lockFile = ./Cargo.lock;
   };
 
+  stripAllList = [ "bin" ];
+
   checkFlags = [ "--skip=formatter::test::format_pico_examples" ]; # requires submodule
 
   meta = {
